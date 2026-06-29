@@ -31,6 +31,8 @@ SBDB_URL = "https://ssd-api.jpl.nasa.gov/sbdb.api"
 HORIZONS_URL = "https://ssd.jpl.nasa.gov/api/horizons.api"
 SENTRY_URL = "https://ssd-api.jpl.nasa.gov/sentry.api"
 MPC_OBS_URL = "https://data.minorplanetcenter.net/api/get-obs"
+NEOCP_LIST_URL = "https://www.minorplanetcenter.net/Extended_Files/neocp.json"
+NEOCP_OBS_URL = "https://www.minorplanetcenter.net/cgi-bin/showobsorbs.cgi"
 OBSCODES_URL = "https://www.minorplanetcenter.net/iau/lists/ObsCodes.html"
 USER_AGENT = "asteroid-trajectory/0.1 (educational orbital mechanics CLI)"
 TIMEOUT = 25
@@ -383,6 +385,24 @@ def _parse_obs80_line(line):
     return jd, ra_deg, dec_deg, line[77:80].strip()
 
 
+def _obs80_lines_to_observations(lines, obscodes=None) -> List:
+    """Turn 80-column observation lines into topocentric ``iod.Observation`` rows."""
+    from .iod import Observation, observer_position_topocentric
+
+    if obscodes is None:
+        obscodes = load_obscodes()
+    observations = []
+    for line in lines:
+        parsed = _parse_obs80_line(line)
+        if parsed is None:
+            continue
+        jd, ra_deg, dec_deg, stn = parsed
+        observer = observer_position_topocentric(stn, jd, obscodes)
+        observations.append(Observation(jd=jd, ra_deg=ra_deg, dec_deg=dec_deg,
+                                        observer=observer))
+    return observations
+
+
 def fetch_mpc_observations(name: str, max_records: Optional[int] = None) -> List:
     """Fetch an object's astrometry from the MPC as a list of ``iod.Observation``.
 
@@ -390,8 +410,6 @@ def fetch_mpc_observations(name: str, max_records: Optional[int] = None) -> List
     observations only; each gets a topocentric observer position from its station
     code. Raises :class:`FetchError` if nothing usable is found.
     """
-    from .iod import Observation, observer_position_topocentric
-
     body = {"desigs": [name], "output_format": ["OBS80"]}
     try:
         resp = requests.get(MPC_OBS_URL, json=body,
@@ -411,21 +429,108 @@ def fetch_mpc_observations(name: str, max_records: Optional[int] = None) -> List
         raise FetchError(f"MPC has no observations for {name!r}")
     lines = block.splitlines() if isinstance(block, str) else list(block)
 
-    obscodes = load_obscodes()
-    observations = []
-    for line in lines:
-        parsed = _parse_obs80_line(line)
-        if parsed is None:
-            continue
-        jd, ra_deg, dec_deg, stn = parsed
-        observer = observer_position_topocentric(stn, jd, obscodes)
-        observations.append(Observation(jd=jd, ra_deg=ra_deg, dec_deg=dec_deg,
-                                        observer=observer))
+    observations = _obs80_lines_to_observations(lines)
     if not observations:
         raise FetchError(f"no usable optical observations for {name!r}")
     if max_records and len(observations) > max_records:
         step = len(observations) / max_records
         observations = [observations[int(i * step)] for i in range(max_records)]
+    return observations
+
+
+# --------------------------------------------------------------------------- #
+# NEO Confirmation Page: objects discovered in the last hours/days that do NOT
+# yet have a published orbit. These are the genuine open problems — raw
+# astrometry exists, but nobody has computed the orbit. fetch_neocp_observations
+# pulls the raw measurements so the determination engine can solve one.
+# --------------------------------------------------------------------------- #
+@dataclass
+class NeocpObject:
+    """One object on the MPC NEO Confirmation Page (no orbit computed yet)."""
+
+    designation: str            # temporary tracklet designation, e.g. "CEQCZT2"
+    score: int                  # MPC's 0-100 "likely a real NEO" digest score
+    discovery: str              # discovery date, "YYYY-MM-DD" (UTC)
+    ra_deg: Optional[float]     # current sky position
+    dec_deg: Optional[float]
+    v_mag: Optional[float]      # current apparent magnitude
+    n_obs: int                  # observations posted so far
+    arc_days: Optional[float]   # observed-arc length (longer => more solvable)
+    h: Optional[float]
+    not_seen_days: Optional[float]
+
+    @property
+    def name(self) -> str:
+        return self.designation
+
+    @property
+    def solvable(self) -> bool:
+        """A rough heuristic: enough observations over a long-enough arc."""
+        return (self.n_obs or 0) >= 3 and (self.arc_days or 0.0) >= 0.05
+
+
+def _parse_neocp_row(row: dict) -> NeocpObject:
+    y = row.get("Discovery_year")
+    mo = row.get("Discovery_month")
+    day = row.get("Discovery_day")
+    try:
+        discovery = f"{int(y):04d}-{int(mo):02d}-{int(float(day)):02d}"
+    except (TypeError, ValueError):
+        discovery = ""
+    ra_hours = _f(row.get("R.A."))           # NEOCP gives R.A. in hours
+    return NeocpObject(
+        designation=str(row.get("Temp_Desig", "")).strip(),
+        score=int(_f(row.get("Score")) or 0),
+        discovery=discovery,
+        ra_deg=ra_hours * 15.0 if ra_hours is not None else None,
+        dec_deg=_f(row.get("Decl.")),
+        v_mag=_f(row.get("V")),
+        n_obs=int(_f(row.get("NObs")) or 0),
+        arc_days=_f(row.get("Arc")),
+        h=_f(row.get("H")),
+        not_seen_days=_f(row.get("Not_Seen_dys")),
+    )
+
+
+def fetch_neocp_list() -> List[NeocpObject]:
+    """The current MPC NEO Confirmation Page list — the live 'open problems'.
+
+    Sorted by observed-arc length (longest first), so the most solvable objects
+    lead. Raises :class:`FetchError` on failure.
+    """
+    data = _get(NEOCP_LIST_URL, {})
+    if not isinstance(data, list):
+        raise FetchError("MPC NEOCP returned an unexpected response")
+    objs = [_parse_neocp_row(r) for r in data if r.get("Temp_Desig")]
+    objs.sort(key=lambda o: (o.arc_days or 0.0), reverse=True)
+    return objs
+
+
+def fetch_neocp_observations(designation: str) -> List:
+    """Raw astrometry for one NEOCP object as ``iod.Observation`` rows.
+
+    The MPC serves these as 80-column lines wrapped in a little HTML; we strip
+    the tags and parse them with the same path as designated-object astrometry.
+    Raises :class:`FetchError` if the object is gone (confirmed/rejected) or has
+    no usable optical observations.
+    """
+    import re
+
+    try:
+        resp = requests.get(NEOCP_OBS_URL, params={"Obj": designation, "obs": "y"},
+                            headers={"User-Agent": USER_AGENT}, timeout=30)
+    except requests.RequestException as exc:
+        raise FetchError(f"network error contacting MPC NEOCP: {exc}") from exc
+    if resp.status_code != 200:
+        raise FetchError(f"MPC NEOCP returned HTTP {resp.status_code}")
+    text = re.sub(r"<[^>]+>", "", resp.text)        # strip <html><pre> wrappers
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        raise FetchError(f"{designation!r} is not on the NEO Confirmation Page "
+                         "(it may have been confirmed, published, or removed)")
+    observations = _obs80_lines_to_observations(lines)
+    if not observations:
+        raise FetchError(f"no usable optical observations for {designation!r}")
     return observations
 
 

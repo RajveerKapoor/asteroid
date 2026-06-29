@@ -85,6 +85,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "pass a number or 'all'). Then run `asteroid <name>` on any.")
     p.add_argument("--risk", action="store_true",
                    help="show an object's NASA/JPL Sentry impact-risk assessment")
+    p.add_argument("--neocp", action="store_true",
+                   help="list the MPC NEO Confirmation Page — freshly discovered "
+                        "objects with raw astrometry but NO computed orbit yet; "
+                        "solve one with `asteroid <desig> --determine`")
     p.add_argument("--info", action="store_true", help="show a full parameter sheet")
     p.add_argument("--update", nargs="*", metavar="NAME",
                    help="refresh/add bodies from JPL (no args = refresh all)")
@@ -452,6 +456,49 @@ def cmd_risk(body: Body) -> int:
     return 0
 
 
+def cmd_neocp_list() -> int:
+    """MPC NEO Confirmation Page — freshly found objects with no orbit yet."""
+    from .fetch import fetch_neocp_list, FetchError
+    with console.status("[dim]Fetching the MPC NEO Confirmation Page...[/dim]"):
+        try:
+            objs = fetch_neocp_list()
+        except FetchError as exc:
+            err_console.print(f"[red]Could not reach the MPC NEOCP:[/red] {exc}")
+            return 1
+    if not objs:
+        console.print("[yellow]The confirmation page is currently empty.[/yellow]")
+        return 0
+
+    table = Table(
+        title=f"☄  MPC NEO Confirmation Page · {len(objs)} unsolved objects",
+        title_style=f"bold {ACCENT}", box=box.SIMPLE_HEAVY,
+        caption="objects with raw astrometry but no computed orbit — "
+                "open problems, sorted by arc length")
+    table.add_column("Designation", style="cyan", no_wrap=True)
+    table.add_column("Discovered", style="dim")
+    table.add_column("Obs", justify="right")
+    table.add_column("Arc (d)", justify="right")
+    table.add_column("V mag", justify="right")
+    table.add_column("Score", justify="right")
+    table.add_column("Solve?", justify="center")
+    for o in objs:
+        arc = f"{o.arc_days:.2f}" if o.arc_days is not None else "—"
+        vmag = f"{o.v_mag:.1f}" if o.v_mag is not None else "—"
+        ok = "[green]✓[/]" if o.solvable else "[dim]too short[/]"
+        table.add_row(o.designation, o.discovery, str(o.n_obs), arc, vmag,
+                      str(o.score), ok)
+    console.print()
+    console.print(table)
+    example = next((o.designation for o in objs if o.solvable),
+                   objs[0].designation)
+    console.print(
+        f"[dim]→ Solve one from its raw observations:[/dim] "
+        f"[{ACCENT}]asteroid {example} --determine[/]")
+    console.print("[dim]These designations are temporary; the page turns over "
+                  "as objects are confirmed, published, or rejected.[/dim]")
+    return 0
+
+
 def cmd_update(names) -> int:
     from .fetch import fetch_sbdb, FetchError
     if not names:
@@ -490,17 +537,33 @@ def cmd_determine(args) -> Optional[Body]:
                               "e.g. `asteroid Apophis --determine`.")
             return None
         name = args.as_name or name_query
-        from .fetch import fetch_mpc_observations, FetchError
+        from .fetch import (fetch_mpc_observations, fetch_neocp_observations,
+                            FetchError)
+        observations, preliminary = None, False
+        # Designated objects live in the MPC archive; brand-new ones live only on
+        # the NEO Confirmation Page. Try the archive first, then fall back to
+        # NEOCP so a fresh, not-yet-computed object solves from the same command.
         try:
             with console.status(f"[{ACCENT}]Fetching observations for "
                                 f"{name_query!r} from the Minor Planet Center…",
                                 spinner="earth"):
                 observations = fetch_mpc_observations(name_query)
-        except FetchError as exc:
-            err_console.print(f"[red]could not fetch observations:[/red] {exc}")
-            return None
-        source_note = f"MPC, {len(observations)} obs"
+            source_note = f"MPC, {len(observations)} obs"
+        except FetchError as archive_exc:
+            try:
+                with console.status(f"[{ACCENT}]Not in the archive — checking the "
+                                    f"NEO Confirmation Page for {name_query!r}…",
+                                    spinner="earth"):
+                    observations = fetch_neocp_observations(name_query)
+                preliminary = True
+                source_note = f"NEOCP, {len(observations)} obs"
+            except FetchError as neocp_exc:
+                err_console.print(f"[red]could not fetch observations:[/red] "
+                                  f"{archive_exc}")
+                err_console.print(f"[dim]NEOCP fallback: {neocp_exc}[/dim]")
+                return None
     else:
+        preliminary = False
         try:
             observations = iod.parse_observation_file(args.observations)
         except (OSError, ValueError) as exc:
@@ -515,6 +578,10 @@ def cmd_determine(args) -> Optional[Body]:
             sol = iod.determine_orbit(observations, name=name)
     except ValueError as exc:
         err_console.print(f"[red]orbit determination failed:[/red] {exc}")
+        if preliminary:
+            err_console.print("[dim]Very short arcs are ill-conditioned for "
+                              "Gauss's method — try again once the object has more "
+                              "observations spanning a longer arc.[/dim]")
         return None
 
     body = Body.from_elements(sol.elements, name=name,
@@ -534,11 +601,26 @@ def cmd_determine(args) -> Optional[Body]:
                       (f"{frames.format_jd(sol.epoch, with_time=False)} "
                        f"(JD {sol.epoch:.4f})", "white")),
     )
+    title = (f"✓ Preliminary orbit solved: {name}" if preliminary
+             else f"✓ Orbit determined: {name}")
     console.print()
-    console.print(Panel(summary, title=Text(f"✓ Orbit determined: {name}",
-                        style="bold green"), title_align="left",
-                        box=box.ROUNDED, border_style="green", padding=(1, 2)))
+    console.print(Panel(summary, title=Text(title, style="bold green"),
+                        title_align="left", box=box.ROUNDED,
+                        border_style="green", padding=(1, 2)))
     console.print(render_elements_table(body))
+    if preliminary:
+        console.print(Panel(
+            Text.assemble(
+                ("This object had no published orbit — you just computed one from "
+                 "raw NEOCP astrometry. ", "white"),
+                ("It is a ", "white"),
+                ("preliminary", "bold yellow"),
+                (" solution: a short arc fits the sky-track tightly but constrains "
+                 "the distance, semi-major axis and period only weakly, so a/e/P "
+                 "may shift a lot as more observations arrive.", "white")),
+            title=Text("⚠  preliminary — short arc", style="bold yellow"),
+            title_align="left", box=box.ROUNDED, border_style="yellow",
+            padding=(1, 2)))
     console.print(f"[dim]Saved — you can now run [/dim][{ACCENT}]asteroid \"{name}\" "
                   f"--approaches[/]  [dim]·[/dim]  [{ACCENT}]--plot[/]  "
                   f"[dim]· … on it.[/dim]")
@@ -717,11 +799,16 @@ def main(argv=None) -> int:
         return cmd_list()
     if args.risk_list is not None:
         return cmd_risk_list(args.risk_list)
+    if args.neocp and not (args.name or args.name_opt):
+        return cmd_neocp_list()
     if args.update is not None:
         return cmd_update(args.update)
 
     # Orbit determination (online MPC or local file) yields a body the rest can use.
-    if args.observations or args.determine:
+    # `<desig> --neocp` is shorthand for determining a confirmation-page object.
+    if args.observations or args.determine or args.neocp:
+        if args.neocp:
+            args.determine = True
         body = cmd_determine(args)
         if body is None:
             return 1

@@ -17,11 +17,13 @@ CLI. It loads real Keplerian orbital elements (from a bundled database of famous
 asteroids, or live from NASA's Small-Body Database), propagates them with a
 **from-scratch two-body solver**, and tells you where the body is, where it is in
 your sky, how bright it is, and when it next passes close to Earth — then draws
-the orbit. It can even go the other way and **determine an orbit from scratch**
-out of raw telescope observations of an object nobody has computed yet, and it
-pulls **NASA's live impact-risk watchlist** so you can compute any of the
-asteroids planetary-defense researchers are actually tracking. It's built to be
-genuinely useful *and* to be a clear, readable illustration of the physics.
+the orbit. It can even go the other way and **determine an orbit from scratch** —
+including pulling **freshly discovered objects off the MPC NEO Confirmation Page**
+that nobody has computed yet and solving a preliminary orbit from their raw
+observations — and it pulls **NASA's live impact-risk watchlist** so you can
+compute any of the asteroids planetary-defense researchers are actually tracking.
+It's built to be genuinely useful *and* to be a clear, readable illustration of
+the physics.
 
 ---
 
@@ -58,6 +60,8 @@ asteroid Apophis --approaches 2025..2035  # find & rank Earth close approaches
 asteroid Apophis --date 2027-06-09 --validate   # check our math vs NASA Horizons
 asteroid Apophis --date 2027-06-09 --precise    # N-body propagation (Sun + 8 planets)
 asteroid Apophis --determine              # derive the orbit from MPC observations online
+asteroid --neocp                          # freshly discovered objects with NO orbit yet
+asteroid P22nJzF --determine              # solve one of those open problems from raw data
 asteroid --risk-list                      # NASA's live asteroid impact-risk watchlist
 asteroid "2000 SG344" --risk              # one object's NASA Sentry impact assessment
 asteroid Apophis --animate                # animate the asteroid tracing its orbit
@@ -177,6 +181,54 @@ barycentre, anchors the geometry); several dense observation windows are tried
 and the best-fitting one is kept. Recovery is exact on clean synthetic data and
 degrades gracefully with noise — a 0.5″ scatter over a 40-day arc still pins the
 orbit to a fraction of a lunar distance a year out.
+
+### Solving real open problems — the NEO Confirmation Page 🛰️
+
+The above works on objects that already have a designation. But the genuinely
+*uncomputed* objects — discovered in the last hours or days, raw astrometry
+posted, **no orbit worked out by anyone yet** — live on the MPC's
+[NEO Confirmation Page](https://www.minorplanetcenter.net/iau/NEO/neocp.txt).
+`--neocp` lists them:
+
+```bash
+asteroid --neocp
+```
+
+```
+☄  MPC NEO Confirmation Page · 26 unsolved objects
+ Designation   Discovered   Obs   Arc (d)   V mag   Score   Solve?
+ P22nJzF       2026-06-22    18     12.00    21.6     100      ✓
+ MAS0006       2026-06-19    33      9.73    20.5      35      ✓
+ P22nLd7       2026-06-23    15      7.96    20.8      95      ✓
+   …
+```
+
+Then point `--determine` at one. It pulls that object's raw observations straight
+off the confirmation page and **solves an orbit nobody has computed yet**:
+
+```bash
+asteroid P22nJzF --determine
+```
+
+```
+╭─ ✓ Preliminary orbit solved: P22nJzF ──────────────────────────╮
+│   Observations  18 over a 12-day arc                           │
+│   Fit residual  0.386" RMS  (8 iterations · excellent)         │
+│   Epoch         2026-06-22                                     │
+╰────────────────────────────────────────────────────────────────╯
+   a -1155.83 AU   e 1.0043   i 147.67°   q 4.97 AU   (hyperbolic!)
+⚠  preliminary — short arc: fits the sky-track tightly but constrains
+   distance/period weakly; a/e/P may shift as more observations arrive.
+```
+
+That run is real — a freshly discovered object with no catalog entry, and the
+solver finds a **hyperbolic, retrograde** orbit (an interstellar-object / long-
+period-comet candidate) from twelve days of raw measurements. **Honesty matters
+here:** a tight residual on a short arc means the orbit *fits the observations*,
+not that it is *accurate* — short arcs pin the on-sky track but leave the distance
+and period loosely constrained, so the tool labels every NEOCP solution
+*preliminary*. It is a genuine first orbit, the same starting point a professional
+follow-up pipeline produces, not the last word.
 
 ---
 
@@ -354,6 +406,8 @@ any unknown body is fetched on demand.
 - **JPL Horizons API** — full-perturbation ephemeris for `--validate`.
 - **JPL Sentry API** — the impact-risk watchlist for `--risk-list` / `--risk`.
 - **MPC observations API** — raw astrometry for `--determine`.
+- **MPC NEO Confirmation Page** — freshly discovered, not-yet-computed objects
+  for `--neocp` (list) and `--determine` (solve a preliminary orbit).
 - **Standish, *Approximate Positions of the Major Planets*** — planet positions.
 
 ---
