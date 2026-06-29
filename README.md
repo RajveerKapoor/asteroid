@@ -9,8 +9,8 @@ asteroid Apophis --date 2029-04-13
 ![Apophis orbit — top-down and 3D](docs/apophis_orbit.png)
 
 > A from-scratch orbital-mechanics engine: real NASA/MPC data in, Kepler's
-> equation and two-body propagation by hand, positions · sky coordinates ·
-> close approaches · orbit determination · visualizations out.
+> equation and two-body + N-body propagation by hand, positions · sky coordinates
+> · close approaches · orbit determination · impact-risk watchlist · out.
 
 `asteroid-trajectory` is a small, dependency-light orbital-mechanics engine and
 CLI. It loads real Keplerian orbital elements (from a bundled database of famous
@@ -18,9 +18,10 @@ asteroids, or live from NASA's Small-Body Database), propagates them with a
 **from-scratch two-body solver**, and tells you where the body is, where it is in
 your sky, how bright it is, and when it next passes close to Earth — then draws
 the orbit. It can even go the other way and **determine an orbit from scratch**
-out of raw telescope observations of an object nobody has computed yet. It's
-built to be genuinely useful *and* to be a clear, readable illustration of the
-physics.
+out of raw telescope observations of an object nobody has computed yet, and it
+pulls **NASA's live impact-risk watchlist** so you can compute any of the
+asteroids planetary-defense researchers are actually tracking. It's built to be
+genuinely useful *and* to be a clear, readable illustration of the physics.
 
 ---
 
@@ -57,6 +58,8 @@ asteroid Apophis --approaches 2025..2035  # find & rank Earth close approaches
 asteroid Apophis --date 2027-06-09 --validate   # check our math vs NASA Horizons
 asteroid Apophis --date 2027-06-09 --precise    # N-body propagation (Sun + 8 planets)
 asteroid Apophis --determine              # derive the orbit from MPC observations online
+asteroid --risk-list                      # NASA's live asteroid impact-risk watchlist
+asteroid "2000 SG344" --risk              # one object's NASA Sentry impact assessment
 asteroid Apophis --animate                # animate the asteroid tracing its orbit
 asteroid Apophis --ascii                  # ASCII orbit map in the terminal
 asteroid Apophis --plot   [FILE]          # matplotlib PNG (2D + 3D)
@@ -177,6 +180,62 @@ orbit to a fraction of a lunar distance a year out.
 
 ---
 
+## Open problems: NASA's impact-risk watchlist ☄️
+
+Which asteroids should you actually compute? `--risk-list` pulls **NASA/JPL
+Sentry** — the live list of every known asteroid with a non-zero computed
+probability of hitting Earth. It is the closest thing planetary defense has to a
+list of *open problems*, and it updates as new objects are found and old ones are
+refined away.
+
+```bash
+asteroid --risk-list           # top 20 (pass a number, or 'all')
+```
+
+```
+☄  NASA impact-risk watchlist · 2164 objects being tracked  (top 6)
+ #   Designation   ⌀ (km)      Impact odds   Palermo   Torino      Window
+ 1   29075            1.3       1 in 2,653     -0.93        0   2880-2880
+ 2   101955          0.49       1 in 1,749     -1.40        0   2178-2290
+ 3   2008 JL3       0.029       1 in 6,031     -2.38        0   2027-2122
+ 4   1979 XB         0.66   1 in 1,174,376     -2.69        0   2056-2113
+ 5   2000 SG344     0.037         1 in 365     -2.77        0   2069-2122
+ 6   2010 RF12     0.0071          1 in 10     -2.97        0   2095-2122
+→ Compute any of them: asteroid "2000 SG344" --approaches · --precise · --risk
+```
+
+Because **any designation resolves live from JPL** (the bundled database is just
+a 25-body offline cache — you are never limited to it), the entire watchlist is
+one command away. Copy a name from the feed and the whole engine is at your
+disposal:
+
+```bash
+asteroid "2000 SG344" --approaches 2065..2125     # when does it come close?
+asteroid "2000 SG344" --precise --date 2071-09-01 # N-body state on a date
+asteroid "2000 SG344" --risk                      # NASA's full risk assessment
+```
+
+`--risk` on any object overlays Sentry's assessment — impact odds, cumulative
+**Palermo** and **Torino** hazard scales, the impact-year window, impact velocity
+and kinetic energy in megatons — onto the normal trajectory report (and says so
+plainly when an object carries no known risk):
+
+```
+⚠  NASA Sentry risk · 101955 Bennu (1999 RQ36)
+       Impact odds  1 in 1,749  (p = 5.72e-04)
+     Palermo scale  -1.40  cumulative
+      Torino scale  0 (no concern)
+     Impact window  2178-2290  (157 potential impacts)
+      Impact speed  12.68 km/s
+     Impact energy  1,421 megatons TNT
+          Based on  554 observations over a 7,693-day arc
+```
+
+The loop closes: **find an open problem → type its name → compute its trajectory,
+close approaches, and risk** — from one tool, on real data.
+
+---
+
 ## The physics
 
 The engine implements classical two-body Keplerian propagation. Given osculating
@@ -290,8 +349,11 @@ any unknown body is fetched on demand.
 
 ## Data sources
 
-- **JPL Small-Body Database (SBDB) API** — orbital elements & physical data.
+- **JPL Small-Body Database (SBDB) API** — orbital elements & physical data
+  (any of ~1.4M known objects, fetched on demand).
 - **JPL Horizons API** — full-perturbation ephemeris for `--validate`.
+- **JPL Sentry API** — the impact-risk watchlist for `--risk-list` / `--risk`.
+- **MPC observations API** — raw astrometry for `--determine`.
 - **Standish, *Approximate Positions of the Major Planets*** — planet positions.
 
 ---
@@ -332,7 +394,7 @@ asteroid/
   observe.py     RA/Dec, magnitude, phase, close-approach scanner
   iod.py         orbit determination from observations (Gauss + least-squares)
   database.py    SQLite cache + Body record + seed loading
-  fetch.py       JPL SBDB & Horizons clients
+  fetch.py       JPL SBDB / Horizons / Sentry + MPC observation clients
   viz.py         ASCII / matplotlib / Plotly orbit views
   data/seed.json bundled database of famous bodies
 tests/           500+ tests (run with: .venv/bin/pytest)

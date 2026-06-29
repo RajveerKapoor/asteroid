@@ -16,6 +16,7 @@ the CLI can fall back to the offline cache with a clear message.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -28,6 +29,7 @@ from .database import Body, db_home, normalize_key
 
 SBDB_URL = "https://ssd-api.jpl.nasa.gov/sbdb.api"
 HORIZONS_URL = "https://ssd.jpl.nasa.gov/api/horizons.api"
+SENTRY_URL = "https://ssd-api.jpl.nasa.gov/sentry.api"
 MPC_OBS_URL = "https://data.minorplanetcenter.net/api/get-obs"
 OBSCODES_URL = "https://www.minorplanetcenter.net/iau/lists/ObsCodes.html"
 USER_AGENT = "asteroid-trajectory/0.1 (educational orbital mechanics CLI)"
@@ -128,6 +130,130 @@ def fetch_sbdb(query: str) -> Body:
         spkid=str(obj.get("spkid", "")),
         source="JPL SBDB",
         fetched_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ"),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Sentry: NASA/JPL's impact-risk list — the "open problems" of NEO science.
+# Every object here has a non-zero computed probability of hitting Earth; the
+# list is what planetary-defense researchers actually watch. Each row carries a
+# designation that resolves straight through fetch_sbdb, so the rest of this
+# tool can compute any of them.
+# --------------------------------------------------------------------------- #
+@dataclass
+class SentryRisk:
+    """One object on the JPL Sentry impact-risk list."""
+
+    designation: str            # e.g. "2000 SG344" — resolves via fetch_sbdb
+    fullname: str
+    impact_prob: float          # cumulative impact probability (ip)
+    palermo_cum: float          # cumulative Palermo Technical Scale (the ranking)
+    palermo_max: float          # single-encounter Palermo maximum
+    torino_max: int             # maximum Torino Scale (0 unless newsworthy)
+    diameter_km: Optional[float]
+    h: Optional[float]
+    v_inf: Optional[float]      # velocity relative to Earth at encounter (km/s)
+    n_impacts: int              # number of distinct potential impacts found
+    year_range: str             # span of potential impact years, e.g. "2056-2113"
+    last_obs: str
+
+    @property
+    def name(self) -> str:
+        return self.designation
+
+
+@dataclass
+class SentryObject:
+    """Sentry's detailed risk summary for a single object."""
+
+    designation: str
+    fullname: str
+    impact_prob: float
+    palermo_cum: float
+    torino_max: int
+    diameter_km: Optional[float]
+    v_impact_km_s: Optional[float]
+    energy_mt: Optional[float]   # kinetic energy at impact (megatons TNT)
+    n_impacts: int
+    year_range: str
+    n_obs: Optional[int]
+    arc_days: Optional[float]
+
+
+def _parse_sentry_row(row: dict) -> SentryRisk:
+    return SentryRisk(
+        designation=str(row.get("des", "")).strip(),
+        fullname=str(row.get("fullname", "")).strip(),
+        impact_prob=_f(row.get("ip")) or 0.0,
+        palermo_cum=_f(row.get("ps_cum")) or -99.0,
+        palermo_max=_f(row.get("ps_max")) or -99.0,
+        torino_max=int(_f(row.get("ts_max")) or 0),
+        diameter_km=_f(row.get("diameter")),
+        h=_f(row.get("h")),
+        v_inf=_f(row.get("v_inf")),
+        n_impacts=int(_f(row.get("n_imp")) or 0),
+        year_range=str(row.get("range", "")).strip(),
+        last_obs=str(row.get("last_obs", "")).strip(),
+    )
+
+
+def fetch_sentry_list(limit: Optional[int] = None) -> List[SentryRisk]:
+    """The JPL Sentry impact-risk list, ranked most-hazardous first.
+
+    Sorted by cumulative Palermo scale (the standard hazard ranking). Pass
+    ``limit`` to keep only the top entries. Raises :class:`FetchError` on failure.
+    """
+    data = _get(SENTRY_URL, {})
+    rows = data.get("data")
+    if not rows:
+        raise FetchError("JPL Sentry returned no risk objects")
+    risks = [_parse_sentry_row(r) for r in rows]
+    risks.sort(key=lambda r: r.palermo_cum, reverse=True)
+    return risks[:limit] if limit else risks
+
+
+def _year_range_from_impacts(impacts: list) -> str:
+    years = []
+    for entry in impacts:
+        date = str(entry.get("date", ""))
+        if len(date) >= 4 and date[:4].isdigit():
+            years.append(int(date[:4]))
+    if not years:
+        return ""
+    return f"{min(years)}" if min(years) == max(years) else f"{min(years)}-{max(years)}"
+
+
+def fetch_sentry_object(designation: str) -> Optional[SentryObject]:
+    """Sentry's risk summary for one object, or ``None`` if it carries no risk.
+
+    Objects not on the Sentry list (the overwhelming majority) return ``None``
+    rather than raising — "no known impact risk" is a normal, useful answer.
+    Sentry replies HTTP 400 "invalid designation" for objects it doesn't track,
+    which is treated as the same no-risk answer.
+    """
+    try:
+        data = _get(SENTRY_URL, {"des": designation})
+    except FetchError as exc:
+        if "invalid designation" in str(exc).lower() or "HTTP 400" in str(exc):
+            return None
+        raise
+    summary = data.get("summary")
+    if not summary:
+        return None
+    impacts = data.get("data", []) or []
+    return SentryObject(
+        designation=str(summary.get("des", designation)).strip(),
+        fullname=str(summary.get("fullname", "")).strip(),
+        impact_prob=_f(summary.get("ip")) or 0.0,
+        palermo_cum=_f(summary.get("ps_cum")) or -99.0,
+        torino_max=int(_f(summary.get("ts_max")) or 0),
+        diameter_km=_f(summary.get("diameter")),
+        v_impact_km_s=_f(summary.get("v_imp")),
+        energy_mt=_f(summary.get("energy")),
+        n_impacts=int(_f(summary.get("n_imp")) or len(impacts)),
+        year_range=_year_range_from_impacts(impacts),
+        n_obs=int(_f(summary.get("nobs")) or 0) or None,
+        arc_days=_f(summary.get("darc")),
     )
 
 

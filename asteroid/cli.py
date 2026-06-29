@@ -78,6 +78,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="render an interactive 3D Plotly HTML of the orbit")
     p.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     p.add_argument("--list", action="store_true", help="list bodies in the local database")
+    p.add_argument("--risk-list", "--open-problems", dest="risk_list", nargs="?",
+                   const="20", metavar="N",
+                   help="show NASA's asteroid impact-risk watchlist — the live "
+                        "'open problems' of planetary defense (default top 20; "
+                        "pass a number or 'all'). Then run `asteroid <name>` on any.")
+    p.add_argument("--risk", action="store_true",
+                   help="show an object's NASA/JPL Sentry impact-risk assessment")
     p.add_argument("--info", action="store_true", help="show a full parameter sheet")
     p.add_argument("--update", nargs="*", metavar="NAME",
                    help="refresh/add bodies from JPL (no args = refresh all)")
@@ -319,6 +326,129 @@ def cmd_list() -> int:
         table.add_row(b.name, f"{b.a:.3f}", f"{b.e:.3f}", f"{b.inc_deg:.2f}",
                       period, b.orbit_class, flags)
     console.print(table)
+    return 0
+
+
+def _impact_odds(ip: float) -> str:
+    """Render an impact probability as friendly '1 in N' odds."""
+    if ip <= 0:
+        return "—"
+    return f"1 in {1.0 / ip:,.0f}"
+
+
+def _palermo_style(ps: float) -> str:
+    """Colour by Palermo scale: >0 is genuinely concerning, -2..0 notable."""
+    if ps >= 0.0:
+        return "bold red"
+    if ps >= -2.0:
+        return "yellow"
+    return "white"
+
+
+def cmd_risk_list(spec: str) -> int:
+    """NASA Sentry impact-risk watchlist — the live 'open problems' feed."""
+    from .fetch import fetch_sentry_list, FetchError
+    spec = (spec or "20").strip().lower()
+    limit = None if spec in ("all", "0") else _safe_int(spec, 20)
+    with console.status("[dim]Fetching NASA/JPL Sentry impact-risk list...[/dim]"):
+        try:
+            risks = fetch_sentry_list()
+        except FetchError as exc:
+            err_console.print(f"[red]Could not reach JPL Sentry:[/red] {exc}")
+            return 1
+    total = len(risks)
+    shown = risks if limit is None else risks[:limit]
+
+    table = Table(
+        title=f"☄  NASA impact-risk watchlist · {total} objects being tracked"
+              + (f"  (top {len(shown)})" if limit else ""),
+        title_style=f"bold {ACCENT}", box=box.SIMPLE_HEAVY)
+    table.add_column("#", justify="right", style="dim")
+    table.add_column("Designation", style="cyan", no_wrap=True)
+    table.add_column("⌀ (km)", justify="right")
+    table.add_column("Impact odds", justify="right")
+    table.add_column("Palermo", justify="right")
+    table.add_column("Torino", justify="right")
+    table.add_column("Window", justify="right", style="dim")
+    for i, r in enumerate(shown, 1):
+        diam = f"{r.diameter_km:g}" if r.diameter_km else "—"
+        torino = f"[bold red]{r.torino_max}[/]" if r.torino_max > 0 else "0"
+        table.add_row(
+            str(i), r.designation, diam, _impact_odds(r.impact_prob),
+            f"[{_palermo_style(r.palermo_cum)}]{r.palermo_cum:+.2f}[/]",
+            torino, r.year_range)
+    console.print()
+    console.print(table)
+    console.print(
+        f"[dim]Ranked by cumulative Palermo scale (higher = more concerning; "
+        f"0 ≈ background-impact risk).[/dim]")
+    example = shown[0].designation if shown else "2000 SG344"
+    console.print(
+        f"[dim]→ Compute any of them:[/dim] [{ACCENT}]asteroid \"{example}\" "
+        f"--approaches[/]  [dim]·[/dim]  [{ACCENT}]--precise[/]  [dim]·[/dim]  "
+        f"[{ACCENT}]--risk[/]  [dim]·[/dim]  [{ACCENT}]--determine[/]")
+    return 0
+
+
+def _safe_int(text: str, default: int) -> int:
+    try:
+        return max(1, int(text))
+    except (TypeError, ValueError):
+        return default
+
+
+def render_risk_panel(detail, body: Optional[Body] = None) -> Panel:
+    """A NASA Sentry impact-risk assessment for one object."""
+    name = (body.fullname or body.name) if body else (detail.fullname or detail.designation)
+    g = Table.grid(padding=(0, 2))
+    g.add_column(justify="right", style="dim", min_width=16)
+    g.add_column(justify="left")
+    g.add_row("Impact odds", f"[bold]{_impact_odds(detail.impact_prob)}[/]  "
+              f"[dim](p = {detail.impact_prob:.2e})[/dim]")
+    g.add_row("Palermo scale", f"[{_palermo_style(detail.palermo_cum)}]"
+              f"{detail.palermo_cum:+.2f}[/]  [dim]cumulative[/dim]")
+    torino = (f"[bold red]{detail.torino_max}[/]" if detail.torino_max > 0
+              else "[green]0[/] [dim](no concern)[/dim]")
+    g.add_row("Torino scale", torino)
+    if detail.year_range:
+        g.add_row("Impact window", f"{detail.year_range}  "
+                  f"[dim]({detail.n_impacts} potential impacts)[/dim]")
+    if detail.diameter_km:
+        g.add_row("Diameter", f"{detail.diameter_km:g} km")
+    if detail.v_impact_km_s:
+        g.add_row("Impact speed", f"{detail.v_impact_km_s:g} km/s")
+    if detail.energy_mt:
+        g.add_row("Impact energy", f"{detail.energy_mt:,.0f} megatons TNT")
+    if detail.n_obs:
+        arc = f" over a {detail.arc_days:,.0f}-day arc" if detail.arc_days else ""
+        g.add_row("Based on", f"{detail.n_obs} observations{arc}")
+    title = Text.assemble(("⚠  NASA Sentry risk · ", "bold yellow"),
+                          (name, f"bold {ACCENT}"))
+    return Panel(g, title=title, title_align="left", box=box.ROUNDED,
+                 border_style="yellow", padding=(1, 2),
+                 subtitle=Text("source: NASA/JPL Sentry", style="dim"),
+                 subtitle_align="right")
+
+
+def cmd_risk(body: Body) -> int:
+    """Print the Sentry risk panel for ``body`` (or a clean 'no risk' note)."""
+    from .fetch import fetch_sentry_object, FetchError
+    query = body.designation or body.name
+    with console.status(f"[dim]Checking NASA Sentry for {body.name}...[/dim]"):
+        try:
+            detail = fetch_sentry_object(query)
+        except FetchError as exc:
+            err_console.print(f"[red]Sentry lookup failed:[/red] {exc}")
+            return 1
+    console.print()
+    if detail is None:
+        console.print(Panel(
+            Text.assemble((f"{body.fullname or body.name}", f"bold {ACCENT}"),
+                          (" is not on NASA's impact-risk list — ", "white"),
+                          ("no known Earth-impact risk.", "bold green")),
+            box=box.ROUNDED, border_style="green", padding=(1, 2)))
+    else:
+        console.print(render_risk_panel(detail, body))
     return 0
 
 
@@ -585,6 +715,8 @@ def main(argv=None) -> int:
     # Standalone commands that need no target body.
     if args.list:
         return cmd_list()
+    if args.risk_list is not None:
+        return cmd_risk_list(args.risk_list)
     if args.update is not None:
         return cmd_update(args.update)
 
@@ -641,6 +773,9 @@ def main(argv=None) -> int:
 
     if args.validate:
         cmd_validate(body, jd, precise=args.precise)
+
+    if args.risk:
+        cmd_risk(body)
 
     if args.animate:
         from . import viz
