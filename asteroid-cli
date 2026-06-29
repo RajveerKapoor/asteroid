@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Thin launcher for the asteroid CLI: runs it from this project's virtualenv
+# without needing to activate the venv. Symlink this onto your PATH, e.g.:
+#   ln -s "$(pwd)/asteroid-cli" ~/bin/asteroid
+set -euo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [ -x "$DIR/.venv/bin/asteroid" ]; then
+    exec "$DIR/.venv/bin/asteroid" "$@"
+elif [ -x "$DIR/.venv/bin/python" ]; then
+    exec "$DIR/.venv/bin/python" -m asteroid "$@"
+else
+    echo "asteroid: no .venv found in $DIR — run: python3 -m venv .venv && .venv/bin/pip install -e '.[viz]'" >&2
+    exec python3 -m asteroid "$@"
+fi

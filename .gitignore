@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtualenv
+.venv/
+venv/
+
+# Tooling
+.pytest_cache/
+.mypy_cache/
+
+# Local database / generated artifacts
+*.db
+# Keep curated example outputs out of source control by default:
+examples/*.png
+examples/*.html
+
+# OS
+.DS_Store
