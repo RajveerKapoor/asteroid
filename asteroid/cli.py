@@ -68,6 +68,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="scan Earth close approaches over a range (default date +-5y)")
     p.add_argument("--validate", action="store_true",
                    help="compare our position against NASA Horizons")
+    p.add_argument("--precise", "--nbody", dest="precise", action="store_true",
+                   help="propagate with the full N-body model (Sun + 8 planets) "
+                        "instead of analytic two-body — far more accurate over years")
     p.add_argument("--ascii", action="store_true", help="draw an ASCII orbit map")
     p.add_argument("--plot", nargs="?", const="__AUTO__", metavar="FILE",
                    help="render a matplotlib PNG of the orbit")
@@ -189,9 +192,18 @@ def _elements_grid(body: Body) -> Table:
     return g
 
 
-def _state_grid(body: Body, jd: float) -> Table:
+def _observe_at(body: Body, jd: float, precise: bool) -> "observe.Observation":
+    """Observation at ``jd`` via two-body or, if ``precise``, the N-body model."""
     el = body.to_elements()
-    o = observe.observe(el, jd, H=body.H)
+    if precise:
+        from . import nbody
+        r, v = nbody.propagate_elements(el, jd)
+        return observe.observe_state(jd, r, v, H=body.H)
+    return observe.observe(el, jd, H=body.H)
+
+
+def _state_grid(body: Body, jd: float, precise: bool = False) -> Table:
+    o = _observe_at(body, jd, precise)
     g = Table.grid(padding=(0, 1))
     g.add_column(justify="right", style="dim", min_width=14)
     g.add_column(justify="left")
@@ -236,9 +248,13 @@ def _physical_text(body: Body) -> Text:
         if bits else Text("")
 
 
-def render_report(body: Body, jd: float, show_approach: bool = True) -> Panel:
+def render_report(body: Body, jd: float, show_approach: bool = True,
+                  precise: bool = False) -> Panel:
     """One cohesive panel: identity, elements, live state, next approach, physical."""
     epoch = f"epoch {frames.format_jd(body.epoch, with_time=False)} · JD {body.epoch:.1f}"
+    pos_note = frames.format_jd(jd)
+    if precise:
+        pos_note += "   · N-body (Sun + 8 planets)"
     blocks = []
     badges = _badges(body)
     if str(badges):
@@ -247,8 +263,8 @@ def render_report(body: Body, jd: float, show_approach: bool = True) -> Panel:
         _section("ORBITAL ELEMENTS", epoch),
         _elements_grid(body),
         Text(""),
-        _section("POSITION & SKY", frames.format_jd(jd)),
-        _state_grid(body, jd),
+        _section("POSITION & SKY", pos_note),
+        _state_grid(body, jd, precise),
     ]
     if show_approach:
         ca = next_close_approach(body, jd)
@@ -408,18 +424,20 @@ def cmd_info(body: Body) -> int:
     return 0
 
 
-def cmd_report(body: Body, jd: float) -> int:
+def cmd_report(body: Body, jd: float, precise: bool = False) -> int:
     console.print()
-    console.print(render_report(body, jd))
+    console.print(render_report(body, jd, precise=precise))
     return 0
 
 
-def cmd_ephemeris(body: Body, jd_start: float, span_days: float, step_days: float) -> int:
+def cmd_ephemeris(body: Body, jd_start: float, span_days: float, step_days: float,
+                  precise: bool = False) -> int:
     el = body.to_elements()
     samples = ephemeris(el, jd_start, jd_start + span_days, step_days)
+    model = " · N-body" if precise else ""
     table = Table(title=f"Ephemeris for {body.name}  "
                         f"({frames.format_jd(jd_start, with_time=False)} "
-                        f"+ {span_days:g} d, step {step_days:g} d)",
+                        f"+ {span_days:g} d, step {step_days:g} d){model}",
                   title_style="bold cyan")
     table.add_column("Date (UTC)", style="cyan")
     table.add_column("r (AU)", justify="right")
@@ -428,10 +446,17 @@ def cmd_ephemeris(body: Body, jd_start: float, span_days: float, step_days: floa
     table.add_column("Dec", justify="right")
     table.add_column("mag", justify="right")
     table.add_column("v (km/s)", justify="right")
-    for s in samples:
-        obs = observe.observe(el, s.jd, H=body.H)
+
+    if precise:
+        from . import nbody
+        states = nbody.ephemeris(el, [s.jd for s in samples])
+        rows = [observe.observe_state(t, r, v, H=body.H) for t, r, v in states]
+    else:
+        rows = [observe.observe(el, s.jd, H=body.H) for s in samples]
+
+    for obs in rows:
         mag = f"{obs.magnitude:.1f}" if obs.magnitude is not None else "—"
-        table.add_row(frames.format_jd(s.jd, with_time=False),
+        table.add_row(frames.format_jd(obs.jd, with_time=False),
                       f"{obs.r_helio:.4f}", f"{obs.delta:.4f}",
                       frames.format_ra(obs.ra), frames.format_dec(obs.dec),
                       mag, f"{obs.speed_helio_km_s:.2f}")
@@ -471,10 +496,14 @@ def cmd_approaches(body: Body, rng: str, center_jd: float) -> int:
     return 0
 
 
-def cmd_validate(body: Body, jd: float) -> int:
+def cmd_validate(body: Body, jd: float, precise: bool = False) -> int:
     from .fetch import fetch_horizons_vector, FetchError
     el = body.to_elements()
-    ours = observe.observe(el, jd).position_helio
+    two = observe.observe(el, jd).position_helio
+    nbody_pos = None
+    if precise:
+        from . import nbody
+        nbody_pos, _ = nbody.propagate_elements(el, jd)
     # Horizons small-body lookup wants the IAU number / packed designation
     # (e.g. "99942"), not the 8-digit SPK-ID.
     query = body.designation or body.name
@@ -485,21 +514,32 @@ def cmd_validate(body: Body, jd: float) -> int:
     except FetchError as exc:
         err_console.print(f"[red]Horizons validation failed:[/red] {exc}")
         return 1
-    diff = ours - nasa
-    dist_km = float(np.linalg.norm(diff)) * AU_KM
     r_km = float(np.linalg.norm(nasa)) * AU_KM
-    rel = dist_km / r_km if r_km else 0.0
+
+    def err_km(p):
+        return float(np.linalg.norm(p - nasa)) * AU_KM
+
     table = Table(title="Validation vs NASA Horizons (heliocentric ecliptic)",
                   title_style="bold cyan", show_header=True)
     table.add_column("", style="dim")
     table.add_column("X (AU)", justify="right")
     table.add_column("Y (AU)", justify="right")
     table.add_column("Z (AU)", justify="right")
-    table.add_row("our two-body", f"{ours[0]:.8f}", f"{ours[1]:.8f}", f"{ours[2]:.8f}")
+    table.add_row("our two-body", f"{two[0]:.8f}", f"{two[1]:.8f}", f"{two[2]:.8f}")
+    if nbody_pos is not None:
+        table.add_row("our N-body", f"{nbody_pos[0]:.8f}", f"{nbody_pos[1]:.8f}",
+                      f"{nbody_pos[2]:.8f}")
     table.add_row("NASA Horizons", f"{nasa[0]:.8f}", f"{nasa[1]:.8f}", f"{nasa[2]:.8f}")
     console.print(table)
-    console.print(f"[bold]Position difference:[/bold] {dist_km:,.0f} km "
-                  f"({rel*100:.4f}% of heliocentric distance)")
+
+    d_two = err_km(two)
+    console.print(f"[bold]Two-body error:[/bold] {d_two:,.0f} km "
+                  f"({d_two / r_km * 100:.4f}% of heliocentric distance)")
+    if nbody_pos is not None:
+        d_nb = err_km(nbody_pos)
+        factor = f"  [green]({d_two / d_nb:,.0f}× better)[/green]" if d_nb > 0 else ""
+        console.print(f"[bold]N-body error:[/bold]   {d_nb:,.0f} km "
+                      f"({d_nb / r_km * 100:.4f}% of heliocentric distance){factor}")
     return 0
 
 
@@ -593,14 +633,14 @@ def main(argv=None) -> int:
         except ValueError as exc:
             err_console.print(f"[red]error:[/red] {exc}")
             return 2
-        rc = cmd_ephemeris(body, jd, span_days, step_days)
+        rc = cmd_ephemeris(body, jd, span_days, step_days, precise=args.precise)
     elif determined and args.date is None and not args.animate:
         rc = 0
     else:
-        rc = cmd_report(body, jd)
+        rc = cmd_report(body, jd, precise=args.precise)
 
     if args.validate:
-        cmd_validate(body, jd)
+        cmd_validate(body, jd, precise=args.precise)
 
     if args.animate:
         from . import viz

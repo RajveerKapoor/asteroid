@@ -140,3 +140,20 @@ def test_live_mpc_determination():
     sol = iod.determine_orbit(obs)
     assert sol.rms_arcsec < 3.0
     assert sol.elements.a == pytest.approx(0.9224, abs=0.01)
+
+
+@pytest.mark.skipif(os.environ.get("ASTEROID_LIVE_TESTS") != "1",
+                    reason="set ASTEROID_LIVE_TESTS=1 to run network tests")
+def test_live_nbody_beats_two_body_vs_horizons():
+    """N-body propagation of a fresh catalog orbit must track Horizons far better
+    than two-body, a year out (away from any deep flyby)."""
+    from asteroid import nbody, observe
+    b = fetch.fetch_sbdb("Bennu")
+    el = b.to_elements()
+    jd = el.epoch + 365.0
+    nasa = fetch.fetch_horizons_vector(b.designation or b.name, jd)
+    err_two = np.linalg.norm(observe.observe(el, jd).position_helio - nasa) * AU_KM
+    r_nb, _ = nbody.propagate_elements(el, jd)
+    err_nb = np.linalg.norm(r_nb - nasa) * AU_KM
+    assert err_nb < 5_000.0            # km: sub-5000-km a year out
+    assert err_nb < err_two / 50.0     # at least 50x better than two-body

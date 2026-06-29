@@ -68,6 +68,22 @@ def test_ephemeris_runs(capsys):
     assert "Ephemeris" in out
 
 
+def test_precise_report_offline(capsys):
+    """--precise routes the single-date report through the N-body propagator."""
+    assert run(["Bennu", "--date", "2027-06-29", "--offline", "--precise"]) == 0
+    out = capsys.readouterr().out
+    assert "Bennu" in out
+    assert "N-body" in out
+    assert "Earth distance" in out
+
+
+def test_precise_ephemeris_offline(capsys):
+    assert run(["Vesta", "--date", "2026-06-29", "--span", "20d",
+                "--step", "10d", "--offline", "--precise"]) == 0
+    out = capsys.readouterr().out
+    assert "Ephemeris" in out and "N-body" in out
+
+
 def test_approaches_finds_apophis_2029(capsys):
     assert run(["Apophis", "--approaches", "2025..2035", "--offline"]) == 0
     out = capsys.readouterr().out

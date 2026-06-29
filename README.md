@@ -54,7 +54,8 @@ asteroid Apophis --date 2029-04-13        # state on a date (the famous flyby)
 asteroid --name Ceres --date 2026-06-29   # explicit flag form
 asteroid Ceres --span 90d --step 5d       # ephemeris table over a span
 asteroid Apophis --approaches 2025..2035  # find & rank Earth close approaches
-asteroid Apophis --date 2029-04-13 --validate   # check our math vs NASA Horizons
+asteroid Apophis --date 2027-06-09 --validate   # check our math vs NASA Horizons
+asteroid Apophis --date 2027-06-09 --precise    # N-body propagation (Sun + 8 planets)
 asteroid Apophis --determine              # derive the orbit from MPC observations online
 asteroid Apophis --animate                # animate the asteroid tracing its orbit
 asteroid Apophis --ascii                  # ASCII orbit map in the terminal
@@ -199,6 +200,27 @@ Major Planets* and run through the **same** solver. Sky coordinates use the
 J2000 obliquity to rotate ecliptic → equatorial → RA/Dec, and apparent magnitude
 uses the IAU H–G phase system.
 
+### N-body propagation (`--precise`)
+
+Two-body propagation is *exact at the orbit's epoch* but ignores the planets, so
+it drifts over time — tens of thousands of km after a couple of years for a
+near-Earth asteroid. Add `--precise` (alias `--nbody`) and the trajectory is
+instead **integrated numerically** under the gravity of the Sun and all eight
+planets (see [`asteroid/nbody.py`](asteroid/nbody.py)):
+
+```
+a = −μ☉·r/|r|³ + Σ_p μ_p·( (r_p − r)/|r_p − r|³ − r_p/|r_p|³ )
+```
+
+The bracket is the standard third-body perturbation (direct planetary pull minus
+the Sun's own acceleration toward that planet, since the heliocentric frame is
+non-inertial). The equations of motion are advanced with an adaptive
+**Dormand–Prince 5(4)** Runge–Kutta step — the same scheme behind MATLAB's
+`ode45` — written from scratch, which automatically shrinks the step near a close
+approach and lengthens it in quiet stretches. The integrator is unit-tested
+against the analytic two-body solution (planets off ⇒ it reproduces Kepler to
+1e-9 AU), energy conservation, and time-reversibility.
+
 The math is verified two ways: a large unit-test suite checks the conservation
 laws it must obey (Kepler residuals, vis-viva energy, angular momentum,
 periodicity), and `--validate` checks the *result* against NASA's
@@ -209,16 +231,27 @@ full-perturbation integrator.
 ## Correctness vs NASA Horizons
 
 `--validate` fetches NASA Horizons' heliocentric vector for the same body and
-instant and reports the difference. For Apophis:
+instant and reports the difference. Add `--precise` and it shows the N-body
+result alongside the two-body one. For Apophis (catalog epoch 2026-06-09):
 
-| Date | Distance from epoch | Our two-body vs Horizons |
-|---|---|---|
-| 2026-09-01 | ~3 months | **2,315 km** (0.0016%) |
-| 2029-04-13 | ~2.8 years, deep flyby | **51,327 km** (0.034%) |
+| Date | From epoch | Two-body vs Horizons | **N-body** (`--precise`) |
+|---|---|---|---|
+| 2026-09-01 | ~3 months | 2,315 km | **5 km** |
+| 2027-06-09 | ~1 year | 45,640 km | **45 km** |
+| 2028-06-08 | ~2 years | 60,508 km | **116 km** |
+| 2029-04-13 | 2029 flyby | 51,327 km | **238 km** |
 
-That growth is the whole point: two-body propagation is excellent near the
-element epoch and drifts over years for near-Earth asteroids because it ignores
-planetary perturbations — most sharply right around a deep close encounter.
+```
+$ asteroid Apophis --date 2027-06-09 --validate --precise
+Two-body error: 45,640 km (0.0286% of heliocentric distance)
+N-body error:        45 km (0.0000% of heliocentric distance)  (1,014× better)
+```
+
+That two-body growth is expected: it is excellent near the element epoch and
+drifts over years for near-Earth asteroids because it ignores planetary
+perturbations. `--precise` puts the planets back in and tracks Horizons two to
+three *orders of magnitude* closer (here ~100–1,000×). The same holds for the
+17-year-old Bennu solution: two-body lands ~6.8 million km off, N-body **273 km**.
 
 The close-approach scanner independently recovers the famous 2029 flyby:
 
@@ -265,8 +298,17 @@ any unknown body is fetched on demand.
 
 ## Accuracy & limitations
 
-- **Two-body model.** Excellent near the element epoch; degrades over years for
+- **Two-body model (default).** Exact at the element epoch; drifts over years for
   NEOs (perturbations, close approaches). Use `--validate` to quantify it.
+- **N-body model (`--precise`).** Integrates the Sun + 8 planets with an adaptive
+  Dormand–Prince step; ~100–1,000× closer to Horizons than two-body over a few
+  years. Two caveats: (1) it is bounded by the arc-minute **Standish planet
+  positions** — *through* a deep flyby (e.g. Apophis after April 2029) that
+  ephemeris error gets amplified into ~10⁶ km downstream, and no step size removes
+  it (matching NASA across the encounter would need DE440-grade planet positions);
+  (2) it integrates from the elements' epoch, so a very old solution (e.g. a
+  1960s comet epoch) still accumulates along-track error over many orbits — run
+  `--update` first to pull a recent epoch.
 - **Planets** use the low-precision Standish series (~arc-minute, valid
   1800–2050). Earth means the Earth–Moon barycentre (~4,700 km from geocentre).
 - **Time scales** UTC ≈ TT ≈ TDB (sub-second-class differences ignored).
@@ -283,7 +325,8 @@ mission-grade work.
 asteroid/
   cli.py         orchestration + rich terminal output (entry point)
   kepler.py      Kepler's equation & anomaly conversions (pure math)
-  propagate.py   elements → heliocentric state vectors, ephemeris
+  propagate.py   elements → heliocentric state vectors, ephemeris (two-body)
+  nbody.py       N-body integrator (Sun + 8 planets, Dormand–Prince 5(4))
   bodies.py      Earth/planet positions (Standish)
   frames.py      time scales & coordinate transforms
   observe.py     RA/Dec, magnitude, phase, close-approach scanner

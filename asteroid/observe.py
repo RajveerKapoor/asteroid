@@ -70,8 +70,25 @@ def phase_integral_magnitude(H: float, r: float, delta: float, alpha_rad: float,
 
 def observe(elements: OrbitalElements, jd: float,
             H: Optional[float] = None, G: float = 0.15) -> Observation:
-    """Build a full :class:`Observation` for ``elements`` at ``jd``."""
+    """Build a full :class:`Observation` for ``elements`` at ``jd``.
+
+    Uses the analytic two-body state. For a perturbed (N-body) state, propagate
+    separately and pass it to :func:`observe_state`.
+    """
     ast, vel = state_vector(elements, jd)
+    return observe_state(jd, ast, vel, H=H, G=G)
+
+
+def observe_state(jd: float, ast: np.ndarray, vel: np.ndarray,
+                  H: Optional[float] = None, G: float = 0.15) -> Observation:
+    """Build a full :class:`Observation` from a precomputed heliocentric state.
+
+    ``ast`` / ``vel`` are the body's heliocentric ecliptic position (AU) and
+    velocity (AU/day) at ``jd`` -- from either two-body or N-body propagation.
+    This is the shared geometry path: sky position, distances, phase, brightness.
+    """
+    ast = np.asarray(ast, dtype=float)
+    vel = np.asarray(vel, dtype=float)
     earth = earth_position(jd)
     geo = ast - earth                      # asteroid as seen from Earth (ecliptic)
 
